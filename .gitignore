@@ -5,6 +5,34 @@
 *.so
 *.dylib
 
+cidr/cidr
+cidripv6/cidripv6
+conntrack/conntrack
+fib/fib
+immediaterule/immediaterule
+l3redirect/l3redirect
+loopbacks/loopbacks
+map/map
+masq/masq
+memoryutilization/memoryutilization
+meta/mark/mark
+proxy/mimic/newsvc
+proxy/svcrule/svcrule
+rawrules/ipversion/ipversion
+rawrules/l4ipv6/l4ipv6
+rawrules/map/map
+rawrules/portset/portset
+rawrules/set/set
+rawrules/snatdnat/snatdnat
+reject/reject
+simpleipv4rule/simpleipv4rule
+simpleipv4v2/simpleipv4v2
+simpleipv6v2/simpleipv6v2
+snatdnat/snatdnat
+sshipv6/sshipv6
+synctables/synctables
+updaterule/updaterule
+
 # Test binary, build with `go test -c`
 *.test
 
