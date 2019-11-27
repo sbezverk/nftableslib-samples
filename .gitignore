@@ -4,6 +4,7 @@
 *.dll
 *.so
 *.dylib
+bin/*
 
 cidr/cidr
 cidripv6/cidripv6
