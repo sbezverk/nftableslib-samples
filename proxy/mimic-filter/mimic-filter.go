@@ -5,7 +5,9 @@ import (
 	"os"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/binaryutil"
 	"github.com/sbezverk/nftableslib"
+	"golang.org/x/sys/unix"
 )
 
 // The following code attempts to mimic in nftables the following iptables rule for chain Filter
@@ -32,12 +34,20 @@ import (
 // -A KUBE-SERVICES -d 57.131.151.19/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
 
 const (
-	k8sFilterInput       = "k8s-filter-input"
-	k8sFilterOutput      = "k8s-filter-output"
-	k8sFilterForward     = "k8s-filter-forward"
+	filterInput          = "filter-input"
+	filterOutput         = "filter-output"
+	filterForward        = "filter-forward"
 	k8sFilterExtServices = "k8s-filter-ext-services"
 	k8sFilterFirewall    = "k8s-filter-firewall"
 	k8sFilterServices    = "k8s-filter-services"
+	k8sFilterForward     = "k8s-filter-forward"
+)
+
+var (
+	ctStateNew         uint32 = 0x08000000
+	ctStateRelated     uint32 = 0x04000000
+	ctStateEstablished uint32 = 0x02000000
+	ctStateInvalid     uint32 = 0x01000000
 )
 
 func setActionVerdict(key int, chain ...string) *nftableslib.RuleAction {
@@ -65,7 +75,7 @@ func setupFilterChains(ci nftableslib.ChainsInterface) error {
 		attrs *nftableslib.ChainAttributes
 	}{
 		{
-			name: k8sFilterInput,
+			name: filterInput,
 			attrs: &nftableslib.ChainAttributes{
 				Type:     nftables.ChainTypeFilter,
 				Priority: 0,
@@ -74,7 +84,7 @@ func setupFilterChains(ci nftableslib.ChainsInterface) error {
 			},
 		},
 		{
-			name: k8sFilterOutput,
+			name: filterOutput,
 			attrs: &nftableslib.ChainAttributes{
 				Type:     nftables.ChainTypeFilter,
 				Priority: 0,
@@ -83,7 +93,7 @@ func setupFilterChains(ci nftableslib.ChainsInterface) error {
 			},
 		},
 		{
-			name: k8sFilterForward,
+			name: filterForward,
 			attrs: &nftableslib.ChainAttributes{
 				Type:     nftables.ChainTypeFilter,
 				Priority: 0,
@@ -103,6 +113,10 @@ func setupFilterChains(ci nftableslib.ChainsInterface) error {
 			name:  k8sFilterServices,
 			attrs: nil,
 		},
+		{
+			name:  k8sFilterForward,
+			attrs: nil,
+		},
 	}
 	for _, chain := range filterChains {
 		if err := ci.Chains().CreateImm(chain.name, chain.attrs); err != nil {
@@ -114,9 +128,259 @@ func setupFilterChains(ci nftableslib.ChainsInterface) error {
 }
 
 func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
+	inputRules := []nftableslib.Rule{
+		{
+			// -A INPUT -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+			Conntracks: []*nftableslib.Conntrack{
+				{
+					Key:   unix.NFT_CT_STATE,
+					Value: binaryutil.BigEndian.PutUint32(ctStateNew),
+				},
+			},
+			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterServices),
+		},
+		{
+			// -A INPUT -j KUBE-FIREWALL
+			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterFirewall),
+		},
+	}
+	// Programming rules for Filter Chain Input hook
+	ri, err := ci.Chains().Chain(filterInput)
+	if err != nil {
+		return err
+	}
+	for _, r := range inputRules {
+		_, err := ri.Rules().CreateImm(&r)
+		if err != nil {
+			return err
+		}
+	}
+	forwardRules := []nftableslib.Rule{
+		{
+			// -A FORWARD -m comment --comment "kubernetes forwarding rules" -j KUBE-FORWARD
+			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterForward),
+		},
+		{
+			// -A FORWARD -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+			Conntracks: []*nftableslib.Conntrack{
+				{
+					Key:   unix.NFT_CT_STATE,
+					Value: binaryutil.BigEndian.PutUint32(ctStateNew),
+				},
+			},
+			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterServices),
+		},
+	}
+	// Programming rules for Filter Chain Forward hook
+	ri, err = ci.Chains().Chain(filterForward)
+	if err != nil {
+		return err
+	}
+	for _, r := range forwardRules {
+		_, err := ri.Rules().CreateImm(&r)
+		if err != nil {
+			return err
+		}
+	}
+	outputRules := []nftableslib.Rule{
+		{
+			// -A OUTPUT -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+			Conntracks: []*nftableslib.Conntrack{
+				{
+					Key:   unix.NFT_CT_STATE,
+					Value: binaryutil.BigEndian.PutUint32(ctStateNew),
+				},
+			},
+			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterServices),
+		},
+		{
+			// -A OUTPUT -j KUBE-FIREWALL
+			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterFirewall),
+		},
+	}
+	// Programming rules for Filter Chain Output hook
+	ri, err = ci.Chains().Chain(filterOutput)
+	if err != nil {
+		return err
+	}
+	for _, r := range outputRules {
+		_, err := ri.Rules().CreateImm(&r)
+		if err != nil {
+			return err
+		}
+	}
 
-	inputRules := []nftableslib.Rule{}
-	  
+	firewallRules := []nftableslib.Rule{
+		{
+			// -A KUBE-FIREWALL -m comment --comment "kubernetes firewall for dropping marked packets" -m mark --mark 0x8000/0x8000 -j DROP
+			Meta: &nftableslib.Meta{
+				Mark: &nftableslib.MetaMark{
+					Set:   false,
+					Value: 0x8000,
+				},
+			},
+			Action: setActionVerdict(nftableslib.NFT_DROP),
+		},
+	}
+	// Programming rules for Filter Chain Firewall hook
+	ri, err = ci.Chains().Chain(k8sFilterFirewall)
+	if err != nil {
+		return err
+	}
+	for _, r := range firewallRules {
+		_, err := ri.Rules().CreateImm(&r)
+		if err != nil {
+			return err
+		}
+	}
+
+	// -A KUBE-FORWARD -s 57.112.0.0/12 -m comment --comment "kubernetes forwarding conntrack pod source rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+	// -A KUBE-FORWARD -d 57.112.0.0/12 -m comment --comment "kubernetes forwarding conntrack pod destination rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+	k8sForwardRules := []nftableslib.Rule{
+		{
+			// -A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+			Conntracks: []*nftableslib.Conntrack{
+				{
+					Key:   unix.NFT_CT_STATE,
+					Value: binaryutil.BigEndian.PutUint32(ctStateInvalid),
+				},
+			},
+			Action: setActionVerdict(nftableslib.NFT_DROP),
+		},
+		{
+			// -A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
+			Meta: &nftableslib.Meta{
+				Mark: &nftableslib.MetaMark{
+					Set:   false,
+					Value: 0x4000,
+				},
+			},
+			Action: setActionVerdict(nftableslib.NFT_ACCEPT),
+		},
+		{
+			// -A KUBE-FORWARD -s 57.112.0.0/12 -m comment --comment "kubernetes forwarding conntrack pod source rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+			L3: &nftableslib.L3Rule{
+				Src: &nftableslib.IPAddrSpec{
+					List: []*nftableslib.IPAddr{setIPAddr("57.112.0.0/12")},
+				},
+			},
+			Conntracks: []*nftableslib.Conntrack{
+				{
+					Key:   unix.NFT_CT_STATE,
+					Value: binaryutil.BigEndian.PutUint32(ctStateRelated | ctStateEstablished),
+				},
+			},
+			Action: setActionVerdict(nftableslib.NFT_ACCEPT),
+		},
+		{
+			// -A KUBE-FORWARD -s 57.112.0.0/12 -m comment --comment "kubernetes forwarding conntrack pod source rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+			L3: &nftableslib.L3Rule{
+				Dst: &nftableslib.IPAddrSpec{
+					List: []*nftableslib.IPAddr{setIPAddr("57.112.0.0/12")},
+				},
+			},
+			Conntracks: []*nftableslib.Conntrack{
+				{
+					Key:   unix.NFT_CT_STATE,
+					Value: binaryutil.BigEndian.PutUint32(ctStateRelated | ctStateEstablished),
+				},
+			},
+			Action: setActionVerdict(nftableslib.NFT_ACCEPT),
+		},
+	}
+
+	// Programming rules for Filter Chain Firewall hook
+	ri, err = ci.Chains().Chain(k8sFilterForward)
+	if err != nil {
+		return err
+	}
+	for _, r := range k8sForwardRules {
+		_, err := ri.Rules().CreateImm(&r)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func setupk8sFilterRules(ti nftableslib.TablesInterface, ci nftableslib.ChainsInterface) error {
+	// Emulating 1 ports sets for service without endpoints
+	si, err := ti.Tables().TableSets("ipv4table", nftables.TableFamilyIPv4)
+	if err != nil {
+		return fmt.Errorf("failed to get sets interface for table ipv4table with error: %+v", err)
+	}
+
+	svc1NoEndpointSet := nftableslib.SetAttributes{
+		Name:     "svc1-no-endpoints",
+		Constant: false,
+		IsMap:    false,
+		KeyType:  nftables.TypeInetService,
+	}
+	se := []nftables.SetElement{
+		{
+			Key: binaryutil.BigEndian.PutUint16(8989),
+		},
+	}
+	svc1Set, err := si.Sets().CreateSet(&svc1NoEndpointSet, se)
+	if err != nil {
+		return fmt.Errorf("failed to create a set of svc ports without endpoints with error: %+v", err)
+
+	}
+	rejectAction, _ := nftableslib.SetReject(unix.NFT_REJECT_ICMP_UNREACH, unix.NFT_REJECT_ICMPX_PORT_UNREACH)
+	servicesRules := []nftableslib.Rule{
+		{
+			// At this point is not clear why two chains are used to filter services without endpoints
+			// -A KUBE-EXTERNAL-SERVICES -d 192.168.80.104/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
+			// -A KUBE-SERVICES -d 57.131.151.19/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
+			L3: &nftableslib.L3Rule{
+				Dst: &nftableslib.IPAddrSpec{
+					List: []*nftableslib.IPAddr{setIPAddr("192.168.80.104/32")},
+				},
+			},
+			L4: &nftableslib.L4Rule{
+				L4Proto: unix.IPPROTO_TCP,
+				Dst: &nftableslib.Port{
+					SetRef: &nftableslib.SetRef{
+						Name:  svc1Set.Name,
+						ID:    svc1Set.ID,
+						IsMap: false,
+					},
+				},
+			},
+			Action: rejectAction,
+		},
+		{
+			L3: &nftableslib.L3Rule{
+				Dst: &nftableslib.IPAddrSpec{
+					List: []*nftableslib.IPAddr{setIPAddr("57.131.151.19/32")},
+				},
+			},
+			L4: &nftableslib.L4Rule{
+				L4Proto: unix.IPPROTO_TCP,
+				Dst: &nftableslib.Port{
+					SetRef: &nftableslib.SetRef{
+						Name:  svc1Set.Name,
+						ID:    svc1Set.ID,
+						IsMap: false,
+					},
+				},
+			},
+			Action: rejectAction,
+		},
+	}
+	ri, err := ci.Chains().Chain(k8sFilterServices)
+	if err != nil {
+		return err
+	}
+	for _, r := range servicesRules {
+		_, err := ri.Rules().CreateImm(&r)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -143,255 +407,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	/*
-		// nat type chains
-		inNetAttr := nftableslib.ChainAttributes{
-			Type:     nftables.ChainTypeNAT,
-			Priority: 0,
-			Hook:     nftables.ChainHookInput,
-			Policy:   nftableslib.ChainPolicyAccept,
-		}
+	if err := setupInitialFilterRules(ci); err != nil {
+		fmt.Printf("Failed to setup filter initial rules with error: %+v\n", err)
+		os.Exit(1)
+	}
 
-		inLocalAttr := nftableslib.ChainAttributes{
-			Type:     nftables.ChainTypeNAT,
-			Priority: 0,
-			Hook:     nftables.ChainHookOutput,
-			Policy:   nftableslib.ChainPolicyAccept,
-		}
-
-		// Deal with packets coming from a node's outside network
-		if err := ci.Chains().CreateImm("input-net", &inNetAttr); err != nil {
-			fmt.Printf("Failed to chain  input-net for table ipv4table with error: %+v\n", err)
-			os.Exit(1)
-		}
-		// Deal with packets coming from a node's local processes
-		if err := ci.Chains().CreateImm("input-local", &inLocalAttr); err != nil {
-			fmt.Printf("Failed to chain  input-local for table ipv4table with error: %+v\n", err)
-			os.Exit(1)
-		}
-
-		// Converged chain of requests to services
-		if err := ci.Chains().CreateImm("services", nil); err != nil {
-			fmt.Printf("Failed to chain  services for table ipv4table with error: %+v\n", err)
-			os.Exit(1)
-		}
-
-		// Emulating 2 sets for services without endpoints
-		si, err := ti.Tables().TableSets("ipv4table", nftables.TableFamilyIPv4)
-		if err != nil {
-			fmt.Printf("Failed to get sets interface for table ipv4table with error: %+v\n", err)
-			os.Exit(1)
-		}
-
-		noEndpointSvcPort := nftableslib.SetAttributes{
-			Name:     "no-endpoint-svc-ports",
-			Constant: false,
-			IsMap:    false,
-			KeyType:  nftables.TypeInetService,
-		}
-		se := []nftables.SetElement{
-			{
-				Key: binaryutil.BigEndian.PutUint16(8080),
-			},
-			{
-				Key: binaryutil.BigEndian.PutUint16(8989),
-			},
-		}
-		noEndpointPortSet, err := si.Sets().CreateSet(&noEndpointSvcPort, se)
-		if err != nil {
-			fmt.Printf("Failed to create a set of svc ports without endpoints with error: %+v\n", err)
-			os.Exit(1)
-		}
-		noEndpointSvcAddr := nftableslib.SetAttributes{
-			Name:     "no-endpoint-svc-addrs",
-			Constant: false,
-			KeyType:  nftables.TypeIPAddr,
-		}
-		se2 := []*nftableslib.IPAddrElement{
-			{
-				Addr: "10.1.1.1",
-			},
-			{
-				Addr: "10.1.1.2",
-			},
-		}
-
-		elements := []nftables.SetElement{}
-		for _, e := range se2 {
-			se, _ := nftableslib.MakeIPAddrElement(e)
-			elements = append(elements, se...)
-		}
-		noEndpointAddrSet, err := si.Sets().CreateSet(&noEndpointSvcAddr, elements)
-		if err != nil {
-			fmt.Printf("Failed to create a set svc addresses  without endpoint with error: %+v\n", err)
-			os.Exit(1)
-		}
-
-		// Creating a rule to Reject packets coming to services without endpoints
-		// two previously defined sets are used to match
-		tcpResetAction, _ := nftableslib.SetReject(unix.NFT_REJECT_TCP_RST, unix.NFT_REJECT_TCP_RST)
-		otherRejectAction, _ := nftableslib.SetReject(unix.NFT_REJECT_ICMP_UNREACH, unix.NFT_REJECT_ICMP_UNREACH)
-
-		tcpRejectRule := nftableslib.Rule{
-			L3: &nftableslib.L3Rule{
-				Dst: &nftableslib.IPAddrSpec{
-					SetRef: &nftableslib.SetRef{
-						Name:  noEndpointAddrSet.Name,
-						ID:    noEndpointAddrSet.ID,
-						IsMap: false,
-					},
-				},
-			},
-			L4: &nftableslib.L4Rule{
-				L4Proto: unix.IPPROTO_TCP,
-				Dst: &nftableslib.Port{
-					SetRef: &nftableslib.SetRef{
-						Name:  noEndpointPortSet.Name,
-						ID:    noEndpointPortSet.ID,
-						IsMap: false,
-					},
-				},
-			},
-			Action: tcpResetAction,
-		}
-
-		otherRejectRule := nftableslib.Rule{
-			L3: &nftableslib.L3Rule{
-				Dst: &nftableslib.IPAddrSpec{
-					SetRef: &nftableslib.SetRef{
-						Name:  noEndpointAddrSet.Name,
-						ID:    noEndpointAddrSet.ID,
-						IsMap: false,
-					},
-				},
-			},
-			L4: &nftableslib.L4Rule{
-				L4Proto: unix.IPPROTO_UDP,
-				Dst: &nftableslib.Port{
-					SetRef: &nftableslib.SetRef{
-						Name:  noEndpointPortSet.Name,
-						ID:    noEndpointPortSet.ID,
-						IsMap: false,
-					},
-				},
-			},
-			Action: otherRejectAction,
-		}
-
-		svcri, err := ci.Chains().Chain("services")
-		if err != nil {
-			fmt.Printf("Failed to get rules interface for chain services with error: %+v\n", err)
-			os.Exit(1)
-		}
-
-		if _, err := svcri.Rules().CreateImm(&tcpRejectRule); err != nil {
-			fmt.Printf("Failed to create initial jump rule to services chain with error: %+v\n", err)
-			os.Exit(1)
-		}
-
-		if _, err := svcri.Rules().CreateImm(&otherRejectRule); err != nil {
-			fmt.Printf("Failed to create initial jump rule to services chain with error: %+v\n", err)
-			os.Exit(1)
-		}
-
-		// Define rule to jump from ingress chains to services chain
-		ra, _ := nftableslib.SetVerdict(unix.NFT_JUMP, "services")
-		firstJump := nftableslib.Rule{
-			Action: ra,
-		}
-
-		c1ri, err := ci.Chains().Chain("input-net")
-		if err != nil {
-			fmt.Printf("Failed to get rules interface for chain input-net with error: %+v\n", err)
-			os.Exit(1)
-		}
-		c2ri, err := ci.Chains().Chain("input-local")
-		if err != nil {
-			fmt.Printf("Failed to get rules interface for chain input-local with error: %+v\n", err)
-			os.Exit(1)
-		}
-
-		if _, err := c1ri.Rules().CreateImm(&firstJump); err != nil {
-			fmt.Printf("Failed to create initial jump rule to services chain with error: %+v\n", err)
-			os.Exit(1)
-		}
-
-		if _, err := c2ri.Rules().CreateImm(&firstJump); err != nil {
-			fmt.Printf("Failed to create initial jump rule to services chain with error: %+v\n", err)
-			os.Exit(1)
-		}
-
-		// Emulating service with endpoints
-
-		svc1EndpointAddr := nftableslib.SetAttributes{
-			Name:     "svc1-endpoint-addrs",
-			Constant: false,
-			KeyType:  nftables.TypeIPAddr,
-		}
-		se2 = []*nftableslib.IPAddrElement{
-			{
-				Addr: "12.1.1.1",
-			},
-			{
-				Addr: "12.1.1.2",
-			},
-		}
-		elements = elements[:0]
-		for _, e := range se2 {
-			se, _ := nftableslib.MakeIPAddrElement(e)
-			elements = append(elements, se...)
-		}
-		 _, err = si.Sets().CreateSet(&svc1EndpointAddr, elements)
-		if err != nil {
-			fmt.Printf("Failed to create a set svc addresses  without endpoint with error: %+v\n", err)
-			os.Exit(1)
-		}
-		svc2EndpointAddr := nftableslib.SetAttributes{
-			Name:     "svc2-endpoint-addrs",
-			Constant: false,
-			KeyType:  nftables.TypeIPAddr,
-		}
-		se2 = []*nftableslib.IPAddrElement{
-			{
-				Addr: "12.1.1.3",
-			},
-			{
-				Addr: "12.1.1.4",
-			},
-		}
-		elements = elements[:0]
-		for _, e := range se2 {
-			se, _ := nftableslib.MakeIPAddrElement(e)
-			elements = append(elements, se...)
-		}
-		 _, err = si.Sets().CreateSet(&svc2EndpointAddr, elements)
-		if err != nil {
-			fmt.Printf("Failed to create a set svc addresses  without endpoint with error: %+v\n", err)
-			os.Exit(1)
-		}
-
-			svc1Rule := nftableslib.Rule{
-				L3: &nftableslib.L3Rule{
-					Dst: &nftableslib.IPAddrSpec{},
-				},
-				L4: &nftableslib.L4Rule{
-					L4Proto: unix.IPPROTO_TCP,
-					Dst: &nftableslib.Port{
-						List: []*uint16{},
-					},
-				},
-			}
-
-			svc2Rule := nftableslib.Rule{
-				L3: &nftableslib.L3Rule{
-					Dst: &nftableslib.IPAddrSpec{},
-				},
-				L4: &nftableslib.L4Rule{
-					L4Proto: unix.IPPROTO_TCP,
-					Dst: &nftableslib.Port{
-						List: []*uint16{},
-					},
-				},
-			}
-	*/
+	if err := setupk8sFilterRules(ti, ci); err != nil {
+		fmt.Printf("Failed to setup filter initial rules with error: %+v\n", err)
+		os.Exit(1)
+	}
 }
