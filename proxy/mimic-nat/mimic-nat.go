@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"os"
 
 	"github.com/google/nftables"
@@ -10,29 +9,6 @@ import (
 	"github.com/sbezverk/nftableslib"
 	"golang.org/x/sys/unix"
 )
-
-// The following code attempts to mimic in nftables the following iptables rule for chain Filter
-// *filter
-// -A INPUT -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
-// -A INPUT -m conntrack --ctstate NEW -m comment --comment "kubernetes externally-visible service portals" -j KUBE-EXTERNAL-SERVICES
-// -A INPUT -j KUBE-FIREWALL
-
-// -A FORWARD -m comment --comment "kubernetes forwarding rules" -j KUBE-FORWARD
-// -A FORWARD -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
-
-// -A OUTPUT -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
-// -A OUTPUT -j KUBE-FIREWALL
-
-// -A KUBE-EXTERNAL-SERVICES -d 192.168.80.104/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
-
-// -A KUBE-FIREWALL -m comment --comment "kubernetes firewall for dropping marked packets" -m mark --mark 0x8000/0x8000 -j DROP
-
-// -A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
-// -A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
-// -A KUBE-FORWARD -s 57.112.0.0/12 -m comment --comment "kubernetes forwarding conntrack pod source rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-// -A KUBE-FORWARD -d 57.112.0.0/12 -m comment --comment "kubernetes forwarding conntrack pod destination rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-
-// -A KUBE-SERVICES -d 57.131.151.19/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
 
 const (
 	filterInput          = "filter-input"
@@ -42,7 +18,6 @@ const (
 	k8sFilterFirewall    = "k8s-filter-firewall"
 	k8sFilterServices    = "k8s-filter-services"
 	k8sFilterForward     = "k8s-filter-forward"
-	k8sFilterDoReject    = "k8s-filter-do-reject"
 )
 
 var (
@@ -117,10 +92,6 @@ func setupFilterChains(ci nftableslib.ChainsInterface) error {
 		},
 		{
 			name:  k8sFilterForward,
-			attrs: nil,
-		},
-		{
-			name:  k8sFilterDoReject,
 			attrs: nil,
 		},
 	}
@@ -307,23 +278,6 @@ func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
 			return err
 		}
 	}
-	rejectAction, _ := nftableslib.SetReject(unix.NFT_REJECT_ICMP_UNREACH, unix.NFT_REJECT_ICMPX_PORT_UNREACH)
-	k8sRejectRules := []nftableslib.Rule{
-		{
-			Action: rejectAction,
-		},
-	}
-	// Programming rules for Filter Chain Firewall hook
-	ri, err = ci.Chains().Chain(k8sFilterDoReject)
-	if err != nil {
-		return err
-	}
-	for _, r := range k8sRejectRules {
-		_, err := ri.Rules().CreateImm(&r)
-		if err != nil {
-			return err
-		}
-	}
 
 	return nil
 }
@@ -335,79 +289,63 @@ func setupk8sFilterRules(ti nftableslib.TablesInterface, ci nftableslib.ChainsIn
 		return fmt.Errorf("failed to get sets interface for table ipv4table with error: %+v", err)
 	}
 
-	noEndpointSet := nftableslib.SetAttributes{
-		Name:     "no-endpoints-services",
+	svc1NoEndpointSet := nftableslib.SetAttributes{
+		Name:     "svc1-no-endpoints",
 		Constant: false,
-		IsMap:    true,
-		KeyType:  GenSetKeyType(nftables.TypeIPAddr, nftables.TypeInetService),
-		DataType: nftables.TypeVerdict,
+		IsMap:    false,
+		KeyType:  nftables.TypeInetService,
 	}
-	se := []nftables.SetElement{}
-	// It is a hack for now just to see it is working, ip and port will be extracted from the service object
-	port1 := uint16(8989)
-	ip1 := "192.168.80.104"
-	ip2 := "57.131.151.19"
-	ra := setActionVerdict(unix.NFT_JUMP, k8sFilterDoReject)
-	se1, err := nftableslib.MakeConcatElement(nftables.TypeIPAddr, nftables.TypeInetService,
-		nftableslib.ElementValue{IPAddr: net.ParseIP(ip1).To4()}, nftableslib.ElementValue{InetService: &port1}, ra)
-	if err != nil {
-		return fmt.Errorf("failed to create a concat element with error: %+v", err)
+	se := []nftables.SetElement{
+		{
+			Key: binaryutil.BigEndian.PutUint16(8989),
+		},
 	}
-	se2, err := nftableslib.MakeConcatElement(nftables.TypeIPAddr, nftables.TypeInetService,
-		nftableslib.ElementValue{IPAddr: net.ParseIP(ip2).To4()}, nftableslib.ElementValue{InetService: &port1}, ra)
-	if err != nil {
-		return fmt.Errorf("failed to create a concat element with error: %+v", err)
-	}
-	se = append(se, *se1)
-	se = append(se, *se2)
-	// neSet, err := si.Sets().CreateSet(&noEndpointSet, se)
-	_, err = si.Sets().CreateSet(&noEndpointSet, se)
+	svc1Set, err := si.Sets().CreateSet(&svc1NoEndpointSet, se)
 	if err != nil {
 		return fmt.Errorf("failed to create a set of svc ports without endpoints with error: %+v", err)
 
 	}
-	// rejectAction, _ := nftableslib.SetReject(unix.NFT_REJECT_ICMP_UNREACH, unix.NFT_REJECT_ICMPX_PORT_UNREACH)
+	rejectAction, _ := nftableslib.SetReject(unix.NFT_REJECT_ICMP_UNREACH, unix.NFT_REJECT_ICMPX_PORT_UNREACH)
 	servicesRules := []nftableslib.Rule{
-		/*		{
-					// At this point is not clear why two chains are used to filter services without endpoints
-					// -A KUBE-EXTERNAL-SERVICES -d 192.168.80.104/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
-					// -A KUBE-SERVICES -d 57.131.151.19/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
-					L3: &nftableslib.L3Rule{
-						Dst: &nftableslib.IPAddrSpec{
-							List: []*nftableslib.IPAddr{setIPAddr("192.168.80.104/32")},
-						},
-					},
-					L4: &nftableslib.L4Rule{
-						L4Proto: unix.IPPROTO_TCP,
-						Dst: &nftableslib.Port{
-							SetRef: &nftableslib.SetRef{
-								Name:  neSet.Name,
-								ID:    neSet.ID,
-								IsMap: false,
-							},
-						},
-					},
-					Action: rejectAction,
+		{
+			// At this point is not clear why two chains are used to filter services without endpoints
+			// -A KUBE-EXTERNAL-SERVICES -d 192.168.80.104/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
+			// -A KUBE-SERVICES -d 57.131.151.19/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
+			L3: &nftableslib.L3Rule{
+				Dst: &nftableslib.IPAddrSpec{
+					List: []*nftableslib.IPAddr{setIPAddr("192.168.80.104/32")},
 				},
-				{
-					L3: &nftableslib.L3Rule{
-						Dst: &nftableslib.IPAddrSpec{
-							List: []*nftableslib.IPAddr{setIPAddr("57.131.151.19/32")},
-						},
+			},
+			L4: &nftableslib.L4Rule{
+				L4Proto: unix.IPPROTO_TCP,
+				Dst: &nftableslib.Port{
+					SetRef: &nftableslib.SetRef{
+						Name:  svc1Set.Name,
+						ID:    svc1Set.ID,
+						IsMap: false,
 					},
-					L4: &nftableslib.L4Rule{
-						L4Proto: unix.IPPROTO_TCP,
-						Dst: &nftableslib.Port{
-							SetRef: &nftableslib.SetRef{
-								Name:  svc1Set.Name,
-								ID:    svc1Set.ID,
-								IsMap: false,
-							},
-						},
-					},
-					Action: rejectAction,
 				},
-		*/
+			},
+			Action: rejectAction,
+		},
+		{
+			L3: &nftableslib.L3Rule{
+				Dst: &nftableslib.IPAddrSpec{
+					List: []*nftableslib.IPAddr{setIPAddr("57.131.151.19/32")},
+				},
+			},
+			L4: &nftableslib.L4Rule{
+				L4Proto: unix.IPPROTO_TCP,
+				Dst: &nftableslib.Port{
+					SetRef: &nftableslib.SetRef{
+						Name:  svc1Set.Name,
+						ID:    svc1Set.ID,
+						IsMap: false,
+					},
+				},
+			},
+			Action: rejectAction,
+		},
 	}
 	ri, err := ci.Chains().Chain(k8sFilterServices)
 	if err != nil {
@@ -454,33 +392,5 @@ func main() {
 	if err := setupk8sFilterRules(ti, ci); err != nil {
 		fmt.Printf("Failed to setup filter initial rules with error: %+v\n", err)
 		os.Exit(1)
-	}
-}
-
-// SetConcateTypeBits defines concatinatio bits, originally defined in
-// https://git.netfilter.org/iptables/tree/iptables/nft.c#n999
-const SetConcateTypeBits = 6
-
-// GenSetKeyType generates a composite key type, combining
-// Temporary location, must be moved into nftableslib
-func GenSetKeyType(types ...nftables.SetDatatype) nftables.SetDatatype {
-	switch len(types) {
-	case 0:
-		return nftables.TypeInvalid
-	case 1:
-		return types[0]
-	default:
-		c := types[0].NFTMagic
-		c = c<<SetConcateTypeBits | types[1].NFTMagic
-		b := types[0].Bytes + types[1].Bytes
-		// Alignment to 4 bytes
-		if b%4 != 0 {
-			b += 4 - (b % 4)
-		}
-		return nftables.SetDatatype{
-			Name:     types[0].Name + "_" + types[1].Name,
-			Bytes:    b,
-			NFTMagic: c,
-		}
 	}
 }
