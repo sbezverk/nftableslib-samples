@@ -35,14 +35,13 @@ import (
 // -A KUBE-SERVICES -d 57.131.151.19/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
 
 const (
-	filterInput          = "filter-input"
-	filterOutput         = "filter-output"
-	filterForward        = "filter-forward"
-	k8sFilterExtServices = "k8s-filter-ext-services"
-	k8sFilterFirewall    = "k8s-filter-firewall"
-	k8sFilterServices    = "k8s-filter-services"
-	k8sFilterForward     = "k8s-filter-forward"
-	k8sFilterDoReject    = "k8s-filter-do-reject"
+	filterInput       = "filter-input"
+	filterOutput      = "filter-output"
+	filterForward     = "filter-forward"
+	k8sFilterFirewall = "k8s-filter-firewall"
+	k8sFilterServices = "k8s-filter-services"
+	k8sFilterForward  = "k8s-filter-forward"
+	k8sFilterDoReject = "k8s-filter-do-reject"
 )
 
 var (
@@ -102,10 +101,6 @@ func setupFilterChains(ci nftableslib.ChainsInterface) error {
 				Hook:     nftables.ChainHookForward,
 				Policy:   nftableslib.ChainPolicyAccept,
 			},
-		},
-		{
-			name:  k8sFilterExtServices,
-			attrs: nil,
 		},
 		{
 			name:  k8sFilterFirewall,
@@ -360,54 +355,35 @@ func setupk8sFilterRules(ti nftableslib.TablesInterface, ci nftableslib.ChainsIn
 	}
 	se = append(se, *se1)
 	se = append(se, *se2)
-	// neSet, err := si.Sets().CreateSet(&noEndpointSet, se)
-	_, err = si.Sets().CreateSet(&noEndpointSet, se)
+	neSet, err := si.Sets().CreateSet(&noEndpointSet, se)
 	if err != nil {
 		return fmt.Errorf("failed to create a set of svc ports without endpoints with error: %+v", err)
 
 	}
-	// rejectAction, _ := nftableslib.SetReject(unix.NFT_REJECT_ICMP_UNREACH, unix.NFT_REJECT_ICMPX_PORT_UNREACH)
+	concatElements := make([]*nftableslib.ConcatElement, 0)
+	concatElements = append(concatElements,
+		&nftableslib.ConcatElement{
+			EType: nftables.TypeIPAddr,
+		},
+	)
+	concatElements = append(concatElements,
+		&nftableslib.ConcatElement{
+			EType:  nftables.TypeInetService,
+			EProto: unix.IPPROTO_TCP,
+		},
+	)
 	servicesRules := []nftableslib.Rule{
-		/*		{
-					// At this point is not clear why two chains are used to filter services without endpoints
-					// -A KUBE-EXTERNAL-SERVICES -d 192.168.80.104/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
-					// -A KUBE-SERVICES -d 57.131.151.19/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
-					L3: &nftableslib.L3Rule{
-						Dst: &nftableslib.IPAddrSpec{
-							List: []*nftableslib.IPAddr{setIPAddr("192.168.80.104/32")},
-						},
-					},
-					L4: &nftableslib.L4Rule{
-						L4Proto: unix.IPPROTO_TCP,
-						Dst: &nftableslib.Port{
-							SetRef: &nftableslib.SetRef{
-								Name:  neSet.Name,
-								ID:    neSet.ID,
-								IsMap: false,
-							},
-						},
-					},
-					Action: rejectAction,
+		{
+			Concat: &nftableslib.Concat{
+				VMap: true,
+				SetRef: &nftableslib.SetRef{
+					Name:  neSet.Name,
+					ID:    neSet.ID,
+					IsMap: true,
 				},
-				{
-					L3: &nftableslib.L3Rule{
-						Dst: &nftableslib.IPAddrSpec{
-							List: []*nftableslib.IPAddr{setIPAddr("57.131.151.19/32")},
-						},
-					},
-					L4: &nftableslib.L4Rule{
-						L4Proto: unix.IPPROTO_TCP,
-						Dst: &nftableslib.Port{
-							SetRef: &nftableslib.SetRef{
-								Name:  svc1Set.Name,
-								ID:    svc1Set.ID,
-								IsMap: false,
-							},
-						},
-					},
-					Action: rejectAction,
-				},
-		*/
+				Elements: concatElements,
+			},
+		},
 	}
 	ri, err := ci.Chains().Chain(k8sFilterServices)
 	if err != nil {
@@ -471,14 +447,22 @@ func GenSetKeyType(types ...nftables.SetDatatype) nftables.SetDatatype {
 		return types[0]
 	default:
 		c := types[0].NFTMagic
-		c = c<<SetConcateTypeBits | types[1].NFTMagic
-		b := types[0].Bytes + types[1].Bytes
+		b := types[0].Bytes
+		name := types[0].Name + "_"
+		for i := 1; i < len(types); i++ {
+			c = c<<SetConcateTypeBits | types[i].NFTMagic
+			b += types[i].Bytes
+			name += types[i].Name
+			if i < len(types) {
+				name += "_"
+			}
+		}
 		// Alignment to 4 bytes
 		if b%4 != 0 {
 			b += 4 - (b % 4)
 		}
 		return nftables.SetDatatype{
-			Name:     types[0].Name + "_" + types[1].Name,
+			Name:     name,
 			Bytes:    b,
 			NFTMagic: c,
 		}
