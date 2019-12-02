@@ -334,7 +334,7 @@ func setupk8sFilterRules(ti nftableslib.TablesInterface, ci nftableslib.ChainsIn
 		Name:     "no-endpoints-services",
 		Constant: false,
 		IsMap:    true,
-		KeyType:  GenSetKeyType(nftables.TypeIPAddr, nftables.TypeInetService),
+		KeyType:  nftableslib.GenSetKeyType(nftables.TypeIPAddr, nftables.TypeInetService),
 		DataType: nftables.TypeVerdict,
 	}
 	se := []nftables.SetElement{}
@@ -430,41 +430,5 @@ func main() {
 	if err := setupk8sFilterRules(ti, ci); err != nil {
 		fmt.Printf("Failed to setup filter initial rules with error: %+v\n", err)
 		os.Exit(1)
-	}
-}
-
-// SetConcateTypeBits defines concatinatio bits, originally defined in
-// https://git.netfilter.org/iptables/tree/iptables/nft.c#n999
-const SetConcateTypeBits = 6
-
-// GenSetKeyType generates a composite key type, combining
-// Temporary location, must be moved into nftableslib
-func GenSetKeyType(types ...nftables.SetDatatype) nftables.SetDatatype {
-	switch len(types) {
-	case 0:
-		return nftables.TypeInvalid
-	case 1:
-		return types[0]
-	default:
-		c := types[0].NFTMagic
-		b := types[0].Bytes
-		name := types[0].Name + "_"
-		for i := 1; i < len(types); i++ {
-			c = c<<SetConcateTypeBits | types[i].NFTMagic
-			b += types[i].Bytes
-			name += types[i].Name
-			if i < len(types) {
-				name += "_"
-			}
-		}
-		// Alignment to 4 bytes
-		if b%4 != 0 {
-			b += 4 - (b % 4)
-		}
-		return nftables.SetDatatype{
-			Name:     name,
-			Bytes:    b,
-			NFTMagic: c,
-		}
 	}
 }
