@@ -5,26 +5,81 @@ import (
 	"os"
 
 	"github.com/google/nftables"
-	"github.com/google/nftables/binaryutil"
 	"github.com/sbezverk/nftableslib"
 	"golang.org/x/sys/unix"
 )
 
-const (
-	filterInput          = "filter-input"
-	filterOutput         = "filter-output"
-	filterForward        = "filter-forward"
-	k8sFilterExtServices = "k8s-filter-ext-services"
-	k8sFilterFirewall    = "k8s-filter-firewall"
-	k8sFilterServices    = "k8s-filter-services"
-	k8sFilterForward     = "k8s-filter-forward"
-)
+// -A PREROUTING -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+// -A OUTPUT -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+// -A POSTROUTING -m comment --comment "kubernetes postrouting rules" -j KUBE-POSTROUTING
+// -A KUBE-MARK-DROP -j MARK --set-xmark 0x8000/0x8000
+// -A KUBE-MARK-MASQ -j MARK --set-xmark 0x4000/0x4000
+// -A KUBE-POSTROUTING -m comment --comment "kubernetes service traffic requiring SNAT" -m mark --mark 0x4000/0x4000 -j MASQUERADE
+// !
+// ! Node ports for services  KUBE-SVC-S4S242M2WNFIAT6Y
+// !
+// -A KUBE-NODEPORTS -p tcp -m comment --comment "istio-system/istio-ingressgateway:tls" -m tcp --dport 30725 -j KUBE-MARK-MASQ
+// -A KUBE-NODEPORTS -p tcp -m comment --comment "istio-system/istio-ingressgateway:tls" -m tcp --dport 30725 -j KUBE-SVC-S4S242M2WNFIAT6Y
+// !
+// ! KUBE-SVC-S4S242M2WNFIAT6Y
+// !
+// -A KUBE-SERVICES ! -s 57.112.0.0/12 -d 57.142.35.114/32 -p tcp -m comment --comment "istio-system/istio-ingressgateway:tls cluster IP" -m tcp --dport 15443 -j KUBE-MARK-MASQ
+// -A KUBE-SERVICES -d 57.142.35.114/32 -p tcp -m comment --comment "istio-system/istio-ingressgateway:tls cluster IP" -m tcp --dport 15443 -j KUBE-SVC-S4S242M2WNFIAT6Y
+// !
+// ! KUBE-SVC-57XVOCFNTLTR3Q27
+// !
+// -A KUBE-SERVICES ! -s 57.112.0.0/12 -d 57.142.221.21/32 -p tcp -m comment --comment "default/app:http-web cluster IP" -m tcp --dport 80 -j KUBE-MARK-MASQ
+// -A KUBE-SERVICES -d 57.142.221.21/32 -p tcp -m comment --comment "default/app:http-web cluster IP" -m tcp --dport 80 -j KUBE-SVC-57XVOCFNTLTR3Q27
+// !
+// ! For externally exposed service portal
+// !
+// -A KUBE-SERVICES -d 57.131.151.19/32 -p tcp -m comment --comment "default/portal:portal cluster IP" -m tcp --dport 8989 -j KUBE-SVC-MUPXPVK4XAZHSWAR
+// -A KUBE-SERVICES -d 192.168.80.104/32 -p tcp -m comment --comment "default/portal:portal external IP" -m tcp --dport 8989 -j KUBE-MARK-MASQ
+// -A KUBE-SERVICES -d 192.168.80.104/32 -p tcp -m comment --comment "default/portal:portal external IP" -m tcp --dport 8989 -m physdev ! --physdev-is-in -m addrtype ! --src-type LOCAL -j KUBE-SVC-MUPXPVK4XAZHSWAR
+// -A KUBE-SERVICES -d 192.168.80.104/32 -p tcp -m comment --comment "default/portal:portal external IP" -m tcp --dport 8989 -m addrtype --dst-type LOCAL -j KUBE-SVC-MUPXPVK4XAZHSWAR
+// !
+// ! Service entry for KUBE-SVC-S4S242M2WNFIAT6Y
+// !
+// -A KUBE-SVC-S4S242M2WNFIAT6Y -j KUBE-SEP-CUAZ6PSSTEDPJ43V
+// !
+// ! Service entry for KUBE-SVC-57XVOCFNTLTR3Q27
+// !
+// -A KUBE-SVC-57XVOCFNTLTR3Q27 -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-FS3FUULGZPVD4VYB
+// -A KUBE-SVC-57XVOCFNTLTR3Q27 -j KUBE-SEP-MMFZROQSLQ3DKOQA
+// !
+// ! Service entry for KUBE-SVC-MUPXPVK4XAZHSWAR
+// !
+// -A KUBE-SVC-MUPXPVK4XAZHSWAR -j KUBE-SEP-LO6TEVOI6GV524F3
+// !
+// ! Endpoint 1 for KUBE-SVC-57XVOCFNTLTR3Q27
+// !
+// -A KUBE-SEP-FS3FUULGZPVD4VYB -s 57.112.0.247/32 -j KUBE-MARK-MASQ
+// -A KUBE-SEP-FS3FUULGZPVD4VYB -p tcp -m tcp -j DNAT --to-destination 57.112.0.247:8080
+// !
+// ! Endpoint 2 for KUBE-SVC-57XVOCFNTLTR3Q27
+// !
+// -A KUBE-SEP-MMFZROQSLQ3DKOQA -s 57.112.0.248/32 -j KUBE-MARK-MASQ
+// -A KUBE-SEP-MMFZROQSLQ3DKOQA -p tcp -m tcp -j DNAT --to-destination 57.112.0.248:8080
+// !
+// ! Endpoint for KUBE-SVC-S4S242M2WNFIAT6Y
+// !
+// -A KUBE-SEP-CUAZ6PSSTEDPJ43V -s 57.112.0.244/32 -j KUBE-MARK-MASQ
+// -A KUBE-SEP-CUAZ6PSSTEDPJ43V -p tcp -m tcp -j DNAT --to-destination 57.112.0.244:15443
+// !
+// ! Endpoint for KUBE-SVC-MUPXPVK4XAZHSWAR
+// !
+// -A KUBE-SEP-LO6TEVOI6GV524F3 -s 57.112.0.250/32 -j KUBE-MARK-MASQ
+// -A KUBE-SEP-LO6TEVOI6GV524F3 -p tcp -m tcp -j DNAT --to-destination 57.112.0.250:38989
 
-var (
-	ctStateNew         uint32 = 0x08000000
-	ctStateRelated     uint32 = 0x04000000
-	ctStateEstablished uint32 = 0x02000000
-	ctStateInvalid     uint32 = 0x01000000
+const (
+	natPrerouting     = "nat-preroutin"
+	natOutput         = "nat-output"
+	natPostrouting    = "nat-postrouting"
+	k8sNATMarkDrop    = "k8s-nat-mark-drop"
+	k8sNATMarkMasq    = "k8s-nat-mark-masq"
+	k8sNATServices    = "k8s-nat-services"
+	k8sNATNodeports   = "k8s-nat-nodeports"
+	k8sNATPostrouting = "k8s-nat-postrouting"
 )
 
 func setActionVerdict(key int, chain ...string) *nftableslib.RuleAction {
@@ -45,57 +100,61 @@ func setIPAddr(addr string) *nftableslib.IPAddr {
 	return a
 }
 
-func setupFilterChains(ci nftableslib.ChainsInterface) error {
-	// filter type chains
-	filterChains := []struct {
+func setupNATChains(ci nftableslib.ChainsInterface) error {
+	// nat type chains
+	natChains := []struct {
 		name  string
 		attrs *nftableslib.ChainAttributes
 	}{
 		{
-			name: filterInput,
+			name: natPrerouting,
 			attrs: &nftableslib.ChainAttributes{
-				Type:     nftables.ChainTypeFilter,
+				Type:     nftables.ChainTypeNAT,
 				Priority: 0,
-				Hook:     nftables.ChainHookInput,
+				Hook:     nftables.ChainHookPrerouting,
 				Policy:   nftableslib.ChainPolicyAccept,
 			},
 		},
 		{
-			name: filterOutput,
+			name: natOutput,
 			attrs: &nftableslib.ChainAttributes{
-				Type:     nftables.ChainTypeFilter,
+				Type:     nftables.ChainTypeNAT,
 				Priority: 0,
 				Hook:     nftables.ChainHookOutput,
 				Policy:   nftableslib.ChainPolicyAccept,
 			},
 		},
 		{
-			name: filterForward,
+			name: natPostrouting,
 			attrs: &nftableslib.ChainAttributes{
-				Type:     nftables.ChainTypeFilter,
+				Type:     nftables.ChainTypeNAT,
 				Priority: 0,
-				Hook:     nftables.ChainHookForward,
+				Hook:     nftables.ChainHookPostrouting,
 				Policy:   nftableslib.ChainPolicyAccept,
 			},
 		},
 		{
-			name:  k8sFilterExtServices,
+			name:  k8sNATMarkDrop,
+			attrs: nil,
+		},
+		//		{
+		//			name:  k8sNATMarkMasq,
+		//			attrs: nil,
+		//		},
+		{
+			name:  k8sNATServices,
 			attrs: nil,
 		},
 		{
-			name:  k8sFilterFirewall,
+			name:  k8sNATNodeports,
 			attrs: nil,
 		},
 		{
-			name:  k8sFilterServices,
-			attrs: nil,
-		},
-		{
-			name:  k8sFilterForward,
+			name:  k8sNATPostrouting,
 			attrs: nil,
 		},
 	}
-	for _, chain := range filterChains {
+	for _, chain := range natChains {
 		if err := ci.Chains().CreateImm(chain.name, chain.attrs); err != nil {
 			return fmt.Errorf("failed to create chain %s with error: %+v", chain.name, err)
 		}
@@ -104,56 +163,19 @@ func setupFilterChains(ci nftableslib.ChainsInterface) error {
 	return nil
 }
 
-func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
-	inputRules := []nftableslib.Rule{
+func setupInitialNATRules(ci nftableslib.ChainsInterface) error {
+	preroutingRules := []nftableslib.Rule{
 		{
-			// -A INPUT -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
-			Conntracks: []*nftableslib.Conntrack{
-				{
-					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateNew),
-				},
-			},
-			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterServices),
-		},
-		{
-			// -A INPUT -j KUBE-FIREWALL
-			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterFirewall),
+			// -A PREROUTING -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+			Action: setActionVerdict(unix.NFT_JUMP, k8sNATServices),
 		},
 	}
-	// Programming rules for Filter Chain Input hook
-	ri, err := ci.Chains().Chain(filterInput)
+	// Programming rules for nat Chain Prerouting hook
+	ri, err := ci.Chains().Chain(natPrerouting)
 	if err != nil {
 		return err
 	}
-	for _, r := range inputRules {
-		_, err := ri.Rules().CreateImm(&r)
-		if err != nil {
-			return err
-		}
-	}
-	forwardRules := []nftableslib.Rule{
-		{
-			// -A FORWARD -m comment --comment "kubernetes forwarding rules" -j KUBE-FORWARD
-			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterForward),
-		},
-		{
-			// -A FORWARD -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
-			Conntracks: []*nftableslib.Conntrack{
-				{
-					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateNew),
-				},
-			},
-			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterServices),
-		},
-	}
-	// Programming rules for Filter Chain Forward hook
-	ri, err = ci.Chains().Chain(filterForward)
-	if err != nil {
-		return err
-	}
-	for _, r := range forwardRules {
+	for _, r := range preroutingRules {
 		_, err := ri.Rules().CreateImm(&r)
 		if err != nil {
 			return err
@@ -161,22 +183,12 @@ func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
 	}
 	outputRules := []nftableslib.Rule{
 		{
-			// -A OUTPUT -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
-			Conntracks: []*nftableslib.Conntrack{
-				{
-					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateNew),
-				},
-			},
-			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterServices),
-		},
-		{
-			// -A OUTPUT -j KUBE-FIREWALL
-			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterFirewall),
+			// -A OUTPUT -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+			Action: setActionVerdict(unix.NFT_JUMP, k8sNATServices),
 		},
 	}
-	// Programming rules for Filter Chain Output hook
-	ri, err = ci.Chains().Chain(filterOutput)
+	// Programming rules for nat Chain Output hook
+	ri, err = ci.Chains().Chain(natOutput)
 	if err != nil {
 		return err
 	}
@@ -186,93 +198,90 @@ func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
 			return err
 		}
 	}
-
-	firewallRules := []nftableslib.Rule{
+	postroutingRules := []nftableslib.Rule{
 		{
-			// -A KUBE-FIREWALL -m comment --comment "kubernetes firewall for dropping marked packets" -m mark --mark 0x8000/0x8000 -j DROP
-			Meta: &nftableslib.Meta{
-				Mark: &nftableslib.MetaMark{
-					Set:   false,
-					Value: 0x8000,
-				},
-			},
-			Action: setActionVerdict(nftableslib.NFT_DROP),
+			// -A POSTROUTING -m comment --comment "kubernetes postrouting rules" -j KUBE-POSTROUTING
+			Action: setActionVerdict(unix.NFT_JUMP, k8sNATPostrouting),
 		},
 	}
-	// Programming rules for Filter Chain Firewall hook
-	ri, err = ci.Chains().Chain(k8sFilterFirewall)
+	// Programming rules for nat Chain Postrouting hook
+	ri, err = ci.Chains().Chain(natPostrouting)
 	if err != nil {
 		return err
 	}
-	for _, r := range firewallRules {
+	for _, r := range postroutingRules {
 		_, err := ri.Rules().CreateImm(&r)
 		if err != nil {
 			return err
 		}
 	}
 
-	// -A KUBE-FORWARD -s 57.112.0.0/12 -m comment --comment "kubernetes forwarding conntrack pod source rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-	// -A KUBE-FORWARD -d 57.112.0.0/12 -m comment --comment "kubernetes forwarding conntrack pod destination rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-
-	k8sForwardRules := []nftableslib.Rule{
+	markDropRules := []nftableslib.Rule{
 		{
-			// -A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
-			Conntracks: []*nftableslib.Conntrack{
-				{
-					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateInvalid),
+			// -A KUBE-MARK-DROP -j MARK --set-xmark 0x8000/0x8000
+			Meta: &nftableslib.Meta{
+				Mark: &nftableslib.MetaMark{
+					Set:   true,
+					Value: 0x8000,
 				},
 			},
-			Action: setActionVerdict(nftableslib.NFT_DROP),
 		},
+	}
+	// Programming rules for k8s Chain k8s-nat-mark-drop
+	ri, err = ci.Chains().Chain(k8sNATMarkDrop)
+	if err != nil {
+		return err
+	}
+	for _, r := range markDropRules {
+		_, err := ri.Rules().CreateImm(&r)
+		if err != nil {
+			return err
+		}
+	}
+
+	//	markMasqRules := []nftableslib.Rule{
+	//		{
+	//			// -A KUBE-MARK-MASQ -j MARK --set-xmark 0x4000/0x4000
+	//			Meta: &nftableslib.Meta{
+	//				Mark: &nftableslib.MetaMark{
+	//					Set:   true,
+	//					Value: 0x4000,
+	//				},
+	//			},
+	//		},
+	//	}
+	// Programming rules for k8s Chain k8s-nat-mark-masq
+	//	ri, err = ci.Chains().Chain(k8sNATMarkMasq)
+	//	if err != nil {
+	//		return err
+	//	}
+	//	for _, r := range markMasqRules {
+	//		_, err := ri.Rules().CreateImm(&r)
+	//		if err != nil {
+	//			return err
+	//		}
+	//	}
+
+	masqAction, _ := nftableslib.SetMasq(true, false, true)
+	k8sPostroutingRules := []nftableslib.Rule{
 		{
-			// -A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
+			// -A KUBE-POSTROUTING -m comment --comment "kubernetes service traffic requiring SNAT" -m mark --mark 0x4000/0x4000 -j MASQUERADE
 			Meta: &nftableslib.Meta{
 				Mark: &nftableslib.MetaMark{
 					Set:   false,
 					Value: 0x4000,
 				},
 			},
-			Action: setActionVerdict(nftableslib.NFT_ACCEPT),
-		},
-		{
-			// -A KUBE-FORWARD -s 57.112.0.0/12 -m comment --comment "kubernetes forwarding conntrack pod source rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-			L3: &nftableslib.L3Rule{
-				Src: &nftableslib.IPAddrSpec{
-					List: []*nftableslib.IPAddr{setIPAddr("57.112.0.0/12")},
-				},
-			},
-			Conntracks: []*nftableslib.Conntrack{
-				{
-					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateRelated | ctStateEstablished),
-				},
-			},
-			Action: setActionVerdict(nftableslib.NFT_ACCEPT),
-		},
-		{
-			// -A KUBE-FORWARD -s 57.112.0.0/12 -m comment --comment "kubernetes forwarding conntrack pod source rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-			L3: &nftableslib.L3Rule{
-				Dst: &nftableslib.IPAddrSpec{
-					List: []*nftableslib.IPAddr{setIPAddr("57.112.0.0/12")},
-				},
-			},
-			Conntracks: []*nftableslib.Conntrack{
-				{
-					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateRelated | ctStateEstablished),
-				},
-			},
-			Action: setActionVerdict(nftableslib.NFT_ACCEPT),
+			Action: masqAction,
 		},
 	}
 
 	// Programming rules for Filter Chain Firewall hook
-	ri, err = ci.Chains().Chain(k8sFilterForward)
+	ri, err = ci.Chains().Chain(k8sNATPostrouting)
 	if err != nil {
 		return err
 	}
-	for _, r := range k8sForwardRules {
+	for _, r := range k8sPostroutingRules {
 		_, err := ri.Rules().CreateImm(&r)
 		if err != nil {
 			return err
@@ -282,76 +291,48 @@ func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
 	return nil
 }
 
-func setupk8sFilterRules(ti nftableslib.TablesInterface, ci nftableslib.ChainsInterface) error {
-	// Emulating 1 ports sets for service without endpoints
-	si, err := ti.Tables().TableSets("ipv4table", nftables.TableFamilyIPv4)
+func setupk8sNATNodeportRules(ti nftableslib.TablesInterface, ci nftableslib.ChainsInterface) error {
+	_, err := ti.Tables().TableSets("ipv4table", nftables.TableFamilyIPv4)
 	if err != nil {
 		return fmt.Errorf("failed to get sets interface for table ipv4table with error: %+v", err)
 	}
-
-	svc1NoEndpointSet := nftableslib.SetAttributes{
-		Name:     "svc1-no-endpoints",
-		Constant: false,
-		IsMap:    false,
-		KeyType:  nftables.TypeInetService,
+	if err := ci.Chains().CreateImm("KUBE-SVC-S4S242M2WNFIAT6Y", nil); err != nil {
+		return fmt.Errorf("failed to create chain KUBE-SVC-S4S242M2WNFIAT6Y with error: %+v", err)
 	}
-	se := []nftables.SetElement{
+	nodeportRules := []nftableslib.Rule{
+		//		{
+		// -A KUBE-NODEPORTS -p tcp -m comment --comment "istio-system/istio-ingressgateway:tls" -m tcp --dport 30725 -j KUBE-MARK-MASQ
+		//			L4: &nftableslib.L4Rule{
+		//				L4Proto: unix.IPPROTO_TCP,
+		//				Dst: &nftableslib.Port{
+		//					List: nftableslib.SetPortList([]int{30725}),
+		//				},
+		//			},
+		//			Action: setActionVerdict(unix.NFT_JUMP, k8sNATMarkMasq),
+		//		},
 		{
-			Key: binaryutil.BigEndian.PutUint16(8989),
-		},
-	}
-	svc1Set, err := si.Sets().CreateSet(&svc1NoEndpointSet, se)
-	if err != nil {
-		return fmt.Errorf("failed to create a set of svc ports without endpoints with error: %+v", err)
-
-	}
-	rejectAction, _ := nftableslib.SetReject(unix.NFT_REJECT_ICMP_UNREACH, unix.NFT_REJECT_ICMPX_PORT_UNREACH)
-	servicesRules := []nftableslib.Rule{
-		{
-			// At this point is not clear why two chains are used to filter services without endpoints
-			// -A KUBE-EXTERNAL-SERVICES -d 192.168.80.104/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
-			// -A KUBE-SERVICES -d 57.131.151.19/32 -p tcp -m comment --comment "default/portal:portal has no endpoints" -m tcp --dport 8989 -j REJECT --reject-with icmp-port-unreachable
-			L3: &nftableslib.L3Rule{
-				Dst: &nftableslib.IPAddrSpec{
-					List: []*nftableslib.IPAddr{setIPAddr("192.168.80.104/32")},
-				},
-			},
+			// -A KUBE-NODEPORTS -p tcp -m comment --comment "istio-system/istio-ingressgateway:tls" -m tcp --dport 30725 -j KUBE-MARK-MASQ
+			// -A KUBE-NODEPORTS -p tcp -m comment --comment "istio-system/istio-ingressgateway:tls" -m tcp --dport 30725 -j KUBE-SVC-S4S242M2WNFIAT6Y
 			L4: &nftableslib.L4Rule{
 				L4Proto: unix.IPPROTO_TCP,
 				Dst: &nftableslib.Port{
-					SetRef: &nftableslib.SetRef{
-						Name:  svc1Set.Name,
-						ID:    svc1Set.ID,
-						IsMap: false,
-					},
+					List: nftableslib.SetPortList([]int{30725}),
 				},
 			},
-			Action: rejectAction,
-		},
-		{
-			L3: &nftableslib.L3Rule{
-				Dst: &nftableslib.IPAddrSpec{
-					List: []*nftableslib.IPAddr{setIPAddr("57.131.151.19/32")},
+			Meta: &nftableslib.Meta{
+				Mark: &nftableslib.MetaMark{
+					Set:   true,
+					Value: 0x4000,
 				},
 			},
-			L4: &nftableslib.L4Rule{
-				L4Proto: unix.IPPROTO_TCP,
-				Dst: &nftableslib.Port{
-					SetRef: &nftableslib.SetRef{
-						Name:  svc1Set.Name,
-						ID:    svc1Set.ID,
-						IsMap: false,
-					},
-				},
-			},
-			Action: rejectAction,
+			Action: setActionVerdict(unix.NFT_JUMP, "KUBE-SVC-S4S242M2WNFIAT6Y"),
 		},
 	}
-	ri, err := ci.Chains().Chain(k8sFilterServices)
+	ri, err := ci.Chains().Chain(k8sNATNodeports)
 	if err != nil {
 		return err
 	}
-	for _, r := range servicesRules {
+	for _, r := range nodeportRules {
 		_, err := ri.Rules().CreateImm(&r)
 		if err != nil {
 			return err
@@ -379,18 +360,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := setupFilterChains(ci); err != nil {
-		fmt.Printf("Failed to setup filter chains with error: %+v\n", err)
+	if err := setupNATChains(ci); err != nil {
+		fmt.Printf("Failed to setup nat chains with error: %+v\n", err)
 		os.Exit(1)
 	}
 
-	if err := setupInitialFilterRules(ci); err != nil {
-		fmt.Printf("Failed to setup filter initial rules with error: %+v\n", err)
+	if err := setupInitialNATRules(ci); err != nil {
+		fmt.Printf("Failed to setup nat initial rules with error: %+v\n", err)
 		os.Exit(1)
 	}
 
-	if err := setupk8sFilterRules(ti, ci); err != nil {
-		fmt.Printf("Failed to setup filter initial rules with error: %+v\n", err)
+	if err := setupk8sNATNodeportRules(ti, ci); err != nil {
+		fmt.Printf("Failed to setup nat initial rules with error: %+v\n", err)
 		os.Exit(1)
 	}
 }
