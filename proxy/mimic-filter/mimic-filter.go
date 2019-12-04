@@ -44,13 +44,6 @@ const (
 	k8sFilterDoReject = "k8s-filter-do-reject"
 )
 
-var (
-	ctStateNew         uint32 = 0x08000000
-	ctStateRelated     uint32 = 0x04000000
-	ctStateEstablished uint32 = 0x02000000
-	ctStateInvalid     uint32 = 0x01000000
-)
-
 func setActionVerdict(key int, chain ...string) *nftableslib.RuleAction {
 	ra, err := nftableslib.SetVerdict(key, chain...)
 	if err != nil {
@@ -135,7 +128,7 @@ func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
 			Conntracks: []*nftableslib.Conntrack{
 				{
 					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateNew),
+					Value: binaryutil.BigEndian.PutUint32(nftableslib.CTStateNew),
 				},
 			},
 			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterServices),
@@ -166,7 +159,7 @@ func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
 			Conntracks: []*nftableslib.Conntrack{
 				{
 					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateNew),
+					Value: binaryutil.BigEndian.PutUint32(nftableslib.CTStateNew),
 				},
 			},
 			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterServices),
@@ -189,7 +182,7 @@ func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
 			Conntracks: []*nftableslib.Conntrack{
 				{
 					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateNew),
+					Value: binaryutil.BigEndian.PutUint32(nftableslib.CTStateNew),
 				},
 			},
 			Action: setActionVerdict(unix.NFT_JUMP, k8sFilterServices),
@@ -244,7 +237,7 @@ func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
 			Conntracks: []*nftableslib.Conntrack{
 				{
 					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateInvalid),
+					Value: binaryutil.BigEndian.PutUint32(nftableslib.CTStateInvalid),
 				},
 			},
 			Action: setActionVerdict(nftableslib.NFT_DROP),
@@ -269,7 +262,7 @@ func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
 			Conntracks: []*nftableslib.Conntrack{
 				{
 					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateRelated | ctStateEstablished),
+					Value: binaryutil.BigEndian.PutUint32(nftableslib.CTStateRelated | nftableslib.CTStateEstablished),
 				},
 			},
 			Action: setActionVerdict(nftableslib.NFT_ACCEPT),
@@ -284,7 +277,7 @@ func setupInitialFilterRules(ci nftableslib.ChainsInterface) error {
 			Conntracks: []*nftableslib.Conntrack{
 				{
 					Key:   unix.NFT_CT_STATE,
-					Value: binaryutil.BigEndian.PutUint32(ctStateRelated | ctStateEstablished),
+					Value: binaryutil.BigEndian.PutUint32(nftableslib.CTStateRelated | nftableslib.CTStateEstablished),
 				},
 			},
 			Action: setActionVerdict(nftableslib.NFT_ACCEPT),

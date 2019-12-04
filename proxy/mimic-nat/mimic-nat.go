@@ -409,12 +409,20 @@ func setupk8sNATServicesRules(ti nftableslib.TablesInterface, ci nftableslib.Cha
 		},
 		{
 			// -A KUBE-SERVICES -d 192.168.80.104/32 -p tcp -m comment --comment "default/portal:portal external IP" -m tcp --dport 8989 -m physdev ! --physdev-is-in -m addrtype ! --src-type LOCAL -j KUBE-SVC-MUPXPVK4XAZHSWAR
-			// -A KUBE-SERVICES -d 192.168.80.104/32 -p tcp -m comment --comment "default/portal:portal external IP" -m tcp --dport 8989 -m addrtype --dst-type LOCAL -j KUBE-SVC-MUPXPVK4XAZHSWAR
 			Fib: &nftableslib.Fib{
 				ResultADDRTYPE: true,
 				FlagSADDR:      true,
 				Data:           []byte{unix.RTN_LOCAL},
 				RelOp:          nftableslib.NEQ,
+			},
+			Meta: &nftableslib.Meta{
+				Expr: []nftableslib.MetaExpr{
+					{
+						Key:   unix.NFT_META_IIFNAME,
+						Value: []byte("bridge"),
+						RelOp: nftableslib.NEQ,
+					},
+				},
 			},
 			L3: &nftableslib.L3Rule{
 				Dst: &nftableslib.IPAddrSpec{
