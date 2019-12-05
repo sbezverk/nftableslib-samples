@@ -630,6 +630,19 @@ func setupk8sSVCsAndEPs(ti nftableslib.TablesInterface, ci nftableslib.ChainsInt
 	}
 	rules = rules[:0]
 
+	loadbalanceAction, _ := nftableslib.SetLoadbalance([]string{"KUBE-SEP-FS3FUULGZPVD4VYB", "KUBE-SEP-MMFZROQSLQ3DKOQA"})
+	rules = []nftableslib.Rule{
+		{
+			// -A KUBE-SVC-57XVOCFNTLTR3Q27 -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-FS3FUULGZPVD4VYB
+			// -A KUBE-SVC-57XVOCFNTLTR3Q27 -j KUBE-SEP-MMFZROQSLQ3DKOQA
+			Action: loadbalanceAction,
+		},
+	}
+	if err := programChainRules(ci, "KUBE-SVC-57XVOCFNTLTR3Q27", rules); err != nil {
+		return err
+	}
+	rules = rules[:0]
+
 	return nil
 }
 
@@ -641,6 +654,7 @@ func programChainRules(ci nftableslib.ChainsInterface, chain string, rules []nft
 	for _, r := range rules {
 		_, err := ri.Rules().CreateImm(&r)
 		if err != nil {
+			fmt.Printf("Rule programming error: %+v\n", err)
 			return err
 		}
 	}
